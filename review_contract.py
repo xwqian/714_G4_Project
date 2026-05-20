@@ -90,7 +90,7 @@ def extract_text(filepath):
         full_text = []
         for i, page in enumerate(doc):
             text = page.get_text().strip()
-            if len(text) < 50:  # 文字太少，说明是图片页，用OCR
+            if len(text) < 50:  # too few characters, indicating an image page, use OCR
                 print(f"  Page {i+1}: using OCR...")
                 pix = page.get_pixmap(dpi=300)
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
@@ -172,9 +172,9 @@ def confirm_review_start(contract_type):
 
 # ── Step 4: Extract contract clauses ──────────────────────────────────────
 def extract_clauses(text, llm):
-    """分段提取条款，确保不遗漏任何内容"""
+    """Segmented extraction terms to ensure that no content is omitted due to token limits."""
     
-    # gpt-4o-mini 安全上限约 80000 字符（留余量给system prompt和输出）
+    # gpt-4o-mini security limit is approximately 80000 characters (leaving room for system prompt and output)
     MAX_CHARS = 80000
     
     if len(text) <= MAX_CHARS:
