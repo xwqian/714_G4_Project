@@ -33,7 +33,7 @@ def download_blob_documents():
         filename = blob.name.split("/")[-1]
         if not filename:
             continue
-        if "Redacted examples" in blob.name:  # 跳过子文件夹
+        if "Redacted examples" in blob.name:  # skip subfolders
             continue
 
         if "Positions" in filename and filename.endswith(".pdf"):
@@ -43,7 +43,7 @@ def download_blob_documents():
             local_path = f"docs/template/{filename}"
             print(f"Downloaded [template]: {filename}")
         else:
-            continue  # 其他格式跳过
+            continue  # other formats skipped
 
         with open(local_path, "wb") as f:
             f.write(container.get_blob_client(blob.name).download_blob().readall())
@@ -65,7 +65,7 @@ def extract_text(filepath):
         full_text = []
         for i, page in enumerate(doc):
             text = page.get_text().strip()
-            if len(text) < 50:  # 文字太少，说明是图片页，用OCR
+            if len(text) < 50:  # too few characters, indicating an image page, use OCR
                 print(f"  Page {i+1}: using OCR...")
                 pix = page.get_pixmap(dpi=300)
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
@@ -135,7 +135,7 @@ def build_vector_store():
             store.add_documents(batch)
         
         if i + batch_size < len(all_docs):
-            time.sleep(15)  # 每批之间暂停15秒
+            time.sleep(15)  # pause for 15 seconds between batches
 
     store.save_local("vector_store")
     print(f"\nVector store ready!")
