@@ -108,8 +108,15 @@ def generate_report(contract_path):
 
         # Cited position clause
         p3 = doc.add_paragraph()
-        p3.add_run("Position clause cited: ").bold = True
-        p3.add_run(r["cited_position_clause"])
+        p3.add_run("Reference cited:").bold = True
+        cited = r["cited_position_clause"]
+        if isinstance(cited, dict):
+           doc.add_paragraph(f"  Document : {cited.get('document', 'N/A')}")
+           doc.add_paragraph(f"  Section  : {cited.get('section', 'N/A')}")
+           doc.add_paragraph(f"  Quote    : {cited.get('quote', 'None found')}")
+        else:
+           doc.add_paragraph(str(cited))
+        
 
         # Historical precedent (AMBER only)
         if r.get("historical_precedent"):

@@ -99,17 +99,30 @@ class DirectAzureEmbeddings(Embeddings):
 # ── 3. Create vector store (Position doc + Historical records) ──────────
 def build_vector_store():
     embeddings = DirectAzureEmbeddings()
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    all_docs = []
+    
+    # Position 文档用更大的 chunk，保留完整的表格行上下文
+    position_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1500,
+        chunk_overlap=200
+    )
+    # 其他文档用标准 chunk
+    standard_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50
+    )
 
+    all_docs = []
     folders = {
-        "docs/position":  "position",
-        "docs/template":  "template",
-        "docs/historical": "historical",
+        "docs/position":   ("position", position_splitter),
+        "docs/template":   ("template", standard_splitter),
+        "docs/historical": ("historical", standard_splitter),
     }
 
-    for folder, doc_type in folders.items():
+    for folder, (doc_type, splitter) in folders.items():
         for f in os.listdir(folder):
+            # 跳过 Word 临时文件
+            if f.startswith("~$"):
+                continue
             text = extract_text(f"{folder}/{f}")
             if not text.strip():
                 continue
@@ -120,26 +133,54 @@ def build_vector_store():
             all_docs.extend(chunks)
             print(f"Indexed [{doc_type}]: {f} ({len(chunks)} chunks)")
 
-    # The store will be built in batches of 50 chunks, with a 15-second pause between batches.
-    print(f"\nTotal chunks: {len(all_docs)}, building vector store in batches...")
+    # 一次性建库，避免 add_documents 丢失 metadata 的问题
+    import time
     batch_size = 50
-    store = None
 
-    for i in range(0, len(all_docs), batch_size):
-        batch = all_docs[i:i + batch_size]
-        print(f"  Embedding batch {i//batch_size + 1}/{(len(all_docs)-1)//batch_size + 1} ({len(batch)} chunks)...")
-        
-        if store is None:
-            store = FAISS.from_documents(batch, embeddings)
-        else:
-            store.add_documents(batch)
-        
-        if i + batch_size < len(all_docs):
-            time.sleep(15)  # pause for 15 seconds between batches
+    # 按类型分组
+    position_docs = [d for d in all_docs if d.metadata.get('type') == 'position']
+    template_docs = [d for d in all_docs if d.metadata.get('type') == 'template']
+    historical_docs = [d for d in all_docs if d.metadata.get('type') == 'historical']
+    print(f"  Position: {len(position_docs)}, Template: {len(template_docs)}, Historical: {len(historical_docs)}")
 
-    store.save_local("vector_store")
+    def build_store_in_batches(docs, label):
+        """分批 embed，用 from_documents 合并，完全不用 add_documents"""
+        if not docs:
+            return None
+        store = None
+        for i in range(0, len(docs), batch_size):
+            batch = docs[i:i + batch_size]
+            print(f"  [{label}] batch {i//batch_size + 1}/{(len(docs)-1)//batch_size + 1}...")
+            if store is None:
+                store = FAISS.from_documents(batch, embeddings)
+            else:
+                # 用 merge_from 代替 add_documents
+                new_store = FAISS.from_documents(batch, embeddings)
+                store.merge_from(new_store)
+            if i + batch_size < len(docs):
+                time.sleep(15)
+        return store
+
+    print("\nBuilding position store...")
+    pos_store = build_store_in_batches(position_docs, "position")
+    
+    print("Building template store...")
+    tmpl_store = build_store_in_batches(template_docs, "template")
+    
+    print("Building historical store...")
+    hist_store = build_store_in_batches(historical_docs, "historical")
+
+    # 合并三个库
+    print("\nMerging stores...")
+    final_store = pos_store
+    if tmpl_store:
+        final_store.merge_from(tmpl_store)
+    if hist_store:
+        final_store.merge_from(hist_store)
+
+    final_store.save_local("vector_store")
     print(f"\nVector store ready!")
 
 if __name__ == "__main__":
-    #download_blob_documents()
+    download_blob_documents()
     build_vector_store()

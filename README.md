@@ -94,7 +94,7 @@ BLOB_FOLDER_HISTORICAL=Contract Reviewer Agent/Redacted examples
 Download documents from Azure Blob Storage and build the local vector store:
 
 ```bash
-python 1_setup_rag.py
+python setup_rag.py
 ```
 
 This will:

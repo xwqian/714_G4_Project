@@ -11,6 +11,17 @@ import pytesseract
 from PIL import Image
 import io
 
+# Help function
+def similarity_search_filtered(store, query, k=3, doc_type=None):
+    if not query or not query.strip():
+        return []
+    raw_results = store.similarity_search(query, k=500)
+    if doc_type is None:
+        return raw_results[:k]
+    filtered = [d for d in raw_results if d.metadata.get('type') == doc_type]
+    if not filtered:
+        print(f"    Warning: no '{doc_type}' documents found for this query")
+    return filtered[:k]
 
 # ── General retry function ──────────────────────────────────────────────
 def invoke_with_retry(llm, prompt, max_retries=3, delay=5):
@@ -49,6 +60,22 @@ CONTRACT_TYPES = [
     "Collaboration Agreements",
     "Confidential Disclosure Agreements",
 ]
+
+# Contract type → corresponding template filename mapping
+CONTRACT_TYPE_TEMPLATES = {
+    "Public Research Contracts":        ["UoA-Research Collaboration Agreement Template (1).docx",
+                                         "UoA-Research Services Agreement (Agency) _June 2024 .docx"],
+    "Commercial Research Contracts":    ["UoA-Research Services Agreement (Agency) _June 2024 .docx",
+                                         "UoA-Master Services Agreement Template (1).docx"],
+    "Subcontracts":                     ["UoA-Template Subcontractor Agreement_2025 (1) (1).docx"],
+    "Material Transfer Agreements":     ["UoA-Material_Transfer_Agreement incoming-Aug 2024.docx",
+                                         "UoA-Material_Transfer_Agreement_outgoing_Aug 2024.docx",
+                                         "UoA-MTA_Outbound for Key Materials-April 2018.docx"],
+    "Data Transfer Agreements":         ["UoA-Data Transfer Agreement Template (incoming) April 2024 .docx",
+                                         "UoA-Data Transfer Agreement Template (outgoing) April 2024.docx"],
+    "Collaboration Agreements":         ["UoA-Research Collaboration Agreement Template (1).docx"],
+    "Confidential Disclosure Agreements": ["UoA-CDA Two Way Template.docx"],
+}
 
 STATUS_COLORS = {
     "GREEN": "✅ Compliant",
@@ -259,18 +286,44 @@ def _parse_clause_json(raw_content, fallback_text):
 
 # ── Step 5: Review clauses individually ──────────────────────────────────────────
 def review_clause(clause, contract_type, store, llm):
-    position_docs = store.similarity_search(
-        clause["text"], k=3,
-        filter={"type": "position"}
+    # 检索 position 文档
+    position_docs = similarity_search_filtered(
+        store, clause["text"], k=3, doc_type="position"
     )
-    position_context = "\n---\n".join(d.page_content for d in position_docs)
+    position_context = "\n---\n".join(
+        f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}"
+        for d in position_docs
+    )
 
+    # 只检索与该合同类型匹配的模板
+    matched_templates = CONTRACT_TYPE_TEMPLATES.get(contract_type, [])
+    if matched_templates:
+        raw_template_docs = similarity_search_filtered(
+            store, clause["text"], k=20, doc_type="template"
+        )
+        # 只保留匹配的模板文件
+        template_docs = [
+            d for d in raw_template_docs
+            if d.metadata.get('source') in matched_templates
+        ][:3]
+        template_context = "\n---\n".join(
+            f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}"
+            for d in template_docs
+        ) if template_docs else "No relevant template clause found."
+    else:
+        template_context = "No template mapped for this contract type."
+
+    # 其余 prompt 和逻辑不变
+    ...
     prompt = f"""
 You are a contract compliance reviewer at the University of Auckland.
 Contract type: {contract_type}
 
-POSITION DOCUMENT RULES:
+POSITION DOCUMENT RULES (primary authority):
 {position_context}
+
+UOA CONTRACT TEMPLATE (secondary reference — use to supplement position rules where position is general):
+{template_context}
 
 CONTRACT CLAUSE #{clause['clause_number']}:
 {clause['text']}
@@ -278,30 +331,48 @@ CONTRACT CLAUSE #{clause['clause_number']}:
 IMPORTANT: Return ONLY valid JSON, no markdown, no backticks, no explanation.
 {{
   "status": "GREEN|RED|BLUE|AMBER",
-  "reasoning": "detailed explanation",
-  "cited_position_clause": "exact quote from position doc, or 'None found'"
+  "reasoning": "detailed explanation referencing both position rules and template where relevant",
+  "cited_position_clause": {{
+    "document": "exact filename from [Source: ...] tag",
+    "section": "section number or heading if identifiable, or 'N/A'",
+    "quote": "exact quoted text from POSITION DOCUMENT RULES or TEMPLATE above"
+  }}
 }}
+
 Rules:
-- GREEN: fully compliant with a clear matching position rule
+- GREEN: compliant with position rules AND/OR consistent with UoA template
 - RED: directly violates a position rule
-- BLUE: no relevant position rule exists for this clause
-- AMBER: uncertain — rule exists but application is unclear
+- BLUE: no relevant rule in position doc AND no relevant template clause — set all cited fields to 'None found'
+- AMBER: uncertain after checking both position doc and template
+
+CRITICAL:
+- Check BOTH position rules and template before deciding status
+- If position rule is general but template has a specific matching clause, use template to determine GREEN/RED
+- cited_position_clause.quote must come from POSITION DOCUMENT RULES or TEMPLATE sections above
+- Quote must NOT be copied from CONTRACT CLAUSE text
+- Document field must match a [Source: ...] tag from above
 """
+
     result = invoke_with_retry(llm, prompt)
     if result is None:
         result = {
             "status": "AMBER",
             "reasoning": "Could not parse model response after retries, manual review required.",
-            "cited_position_clause": "None found",
+            "cited_position_clause": {
+                "document": "N/A",
+                "section": "N/A",
+                "quote": "None found"
+            },
         }
 
-    # AMBER: Query historical contracts
+    # AMBER: 查询历史合同
     if result["status"] == "AMBER":
-        history_docs = store.similarity_search(
-            clause["text"], k=3,
-            filter={"type": "historical"}
+        history_docs = similarity_search_filtered(
+            store, clause["text"], k=3, doc_type="historical"
         )
-        history_context = "\n---\n".join(d.page_content for d in history_docs)
+        history_context = "\n---\n".join(
+            d.page_content for d in history_docs
+        )
         hist_prompt = f"""
 This contract clause is in the AMBER zone (uncertain compliance).
 Search these historical records for similar clauses and outcomes.
@@ -317,7 +388,9 @@ IMPORTANT: Return ONLY valid JSON, no markdown, no backticks, no explanation.
 """
         hist_result = invoke_with_retry(llm, hist_prompt)
         if hist_result:
-            result["historical_precedent"] = hist_result.get("historical_precedent", "No similar case found")
+            result["historical_precedent"] = hist_result.get(
+                "historical_precedent", "No similar case found"
+            )
         else:
             result["historical_precedent"] = "Could not retrieve historical precedent."
     else:
@@ -357,6 +430,9 @@ def review_contract(filepath):
 
     results = []
     for clause in clauses:
+        if not clause.get("text", "").strip():
+            print(f"  Skipping clause {clause.get('clause_number', '?')} (empty text)")
+            continue
         print(f"  Reviewing clause {clause['clause_number']}...", end=" ")
         result = review_clause(clause, contract_type, store, llm)
         results.append(result)
